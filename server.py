@@ -1,4 +1,3 @@
-cat << 'EOF' > /opt/tiktok-wg-manager/server.py
 import json
 import subprocess
 import uuid
@@ -15,7 +14,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>TikTok WG Manager v3.2</title>
+    <title>TikTok WG Manager v3.1 (防泄漏版)</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; padding: 20px; margin: 0; }
         .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
@@ -36,7 +35,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1 style="text-align: center; color: #111827;">🚀 跨境直播全局控制中心 v3.2</h1>
+        <h1 style="text-align: center; color: #111827;">🚀 跨境直播全局控制中心 v3.1 <span style="font-size:16px; color:#10a37f;">(DNS防泄漏)</span></h1>
         
         {% if message %}<div class="success"><b>✅ 成功：</b>{{ message }}</div>{% endif %}
         {% if error %}<div class="error"><b>❌ 错误：</b><pre style="margin:0;">{{ error }}</pre></div>{% endif %}
@@ -99,7 +98,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="panel">
-            <h2>第二步：生成 VLESS 订阅</h2>
+            <h2>第二步：生成 VLESS 订阅 (防DNS泄漏版)</h2>
             <form method="POST">
                 <input type="hidden" name="action" value="add_vless">
                 <div style="display: flex; gap: 15px;">
@@ -130,13 +129,100 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def migrate_legacy_dns_server(s):
+    """将 sing-box 1.12 之前的旧版 DNS server 字段（address）迁移为新格式（type + server）。
+    兼容 1.12.0+，避免出现 'legacy DNS servers is deprecated' 导致的 FATAL 退出。"""
+    if 'type' in s:
+        return s  # 已经是新格式，跳过
+    addr = s.pop('address', None)
+    if addr is None:
+        return s
+    if addr == 'local':
+        s['type'] = 'local'
+    elif '://' in addr:
+        # 例如 https://1.1.1.1/dns-query、tls://8.8.8.8 等
+        scheme, rest = addr.split('://', 1)
+        s['type'] = scheme
+        s['server'] = rest.split('/')[0]
+    else:
+        # 纯 IP，按明文 UDP DNS 处理
+        s['type'] = 'udp'
+        s['server'] = addr
+    return s
+
+
+def migrate_legacy_dns_block(dns_block):
+    """就地迁移整个 dns.servers 列表，返回是否发生了改动。"""
+    changed = False
+    for s in dns_block.get('servers', []):
+        if 'type' not in s:
+            migrate_legacy_dns_server(s)
+            changed = True
+    return changed
+
+
+def default_dns_block():
+    return {"servers": [{"tag": "dns-local", "type": "udp", "server": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+
+
+def ensure_vless_dns(config):
+    """让每个 VLESS 的域名解析和业务连接使用同一个 WG 出口。
+
+    dns.rules 只匹配客户端显式发来的 DNS 请求；访问域名时，direct
+    outbound 自身的解析还必须通过 domain_resolver 指定，否则会回落
+    到中转 VPS 的系统 DNS。
+    """
+    dns = config.setdefault('dns', default_dns_block())
+    dns.setdefault('servers', [])
+    dns.setdefault('rules', [])
+
+    inbound_tags = {item.get('tag') for item in config.get('inbounds', [])
+                    if item.get('type') == 'vless'}
+    for outbound in config.get('outbounds', []):
+        tag = outbound.get('tag', '')
+        if outbound.get('type') != 'direct' or not tag.startswith('out-'):
+            continue
+        port = tag[4:]
+        inbound_tag = f'in-{port}'
+        if inbound_tag not in inbound_tags or not outbound.get('bind_interface'):
+            continue
+
+        dns_tag = f'dns-{port}'
+        if not any(server.get('tag') == dns_tag for server in dns['servers']):
+            dns['servers'].append({
+                'tag': dns_tag,
+                'type': 'udp',
+                'server': '1.1.1.1',
+                'detour': tag,
+            })
+        if not any(rule.get('inbound') in ([inbound_tag], inbound_tag)
+                   and rule.get('server') == dns_tag for rule in dns['rules']):
+            dns['rules'].insert(0, {'inbound': [inbound_tag], 'server': dns_tag})
+        outbound['domain_resolver'] = dns_tag
+
+    return config
+
+
 def load_config():
     if os.path.exists(SINGBOX_CONF) and os.path.getsize(SINGBOX_CONF) > 0:
         try:
             with open(SINGBOX_CONF, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
+                original_config = json.dumps(config, sort_keys=True)
+                # 初始化 DNS 模块，开启独立缓存隔离
+                if 'dns' not in config:
+                    config['dns'] = default_dns_block()
+                else:
+                    # 自动迁移旧版 DNS server 格式（address -> type/server），
+                    # 修复历史生成的 config.json 触发的 FATAL 崩溃循环
+                    if migrate_legacy_dns_block(config['dns']):
+                        save_config(config)
+                ensure_vless_dns(config)
+                if json.dumps(config, sort_keys=True) != original_config:
+                    save_config(config)
+                return config
         except: pass
-    return {"log": {"level": "info"}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
+    return {"log": {"level": "info"}, "dns": default_dns_block(), "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
 
 def save_config(config):
     os.makedirs(os.path.dirname(SINGBOX_CONF), exist_ok=True)
@@ -199,22 +285,34 @@ PersistentKeepalive = 25
                 user_uuid = str(uuid.uuid4())
                 short_id = secrets.token_hex(8)
 
+                # 为该端口生成专属 DNS：显式 DNS 请求和域名的内部解析都走 WG。
+                if 'dns' not in config:
+                    config['dns'] = default_dns_block()
+                
+                config['dns']['servers'].append({"tag": f"dns-{port}", "type": "udp", "server": "1.1.1.1", "detour": f"out-{port}"})
+                config['dns']['rules'].insert(0, {"inbound": [f"in-{port}"], "server": f"dns-{port}"})
+
                 config['inbounds'].append({"type": "vless", "tag": f"in-{port}", "listen": "::", "listen_port": port, "users": [{"uuid": user_uuid, "flow": "xtls-rprx-vision"}], "tls": {"enabled": True, "server_name": sni, "reality": {"enabled": True, "handshake": {"server": sni, "server_port": 443}, "private_key": priv_key, "short_id": [short_id]}}})
-                config['outbounds'].append({"type": "direct", "tag": f"out-{port}", "bind_interface": wg_int})
+                config['outbounds'].append({"type": "direct", "tag": f"out-{port}", "bind_interface": wg_int, "domain_resolver": f"dns-{port}"})
                 config['route']['rules'].insert(0, {"inbound": f"in-{port}", "outbound": f"out-{port}"})
                 
                 save_config(config)
                 subprocess.run(['systemctl', 'restart', 'sing-box'], check=True)
                 
                 qs = urllib.parse.urlencode({'encryption': 'none', 'flow': 'xtls-rprx-vision', 'security': 'reality', 'sni': sni, 'fp': 'chrome', 'pbk': pub_key, 'sid': short_id, 'type': 'tcp', 'headerType': 'none'})
-                link = f"vless://{user_uuid}@{request.host.split(':')[0]}:{port}?{qs}#{wg_int}-{port}"
+                link = f"vless://{user_uuid}@{request.form['vps_ip']}:{port}?{qs}#{wg_int}-{port}"
                 message = f"节点生成成功！一键导入链接：\n{link}"
 
             elif action == 'del_vless':
                 port = int(request.form['port'])
                 config['inbounds'] = [i for i in config.get('inbounds', []) if i.get('listen_port') != port]
                 config['outbounds'] = [o for o in config.get('outbounds', []) if o.get('tag') != f"out-{port}"]
-                config['route']['rules'] = [r for r in config.get('route', {}).get('rules', []) if r.get('inbound'] != f"in-{port}"]
+                config['route']['rules'] = [r for r in config.get('route', {}).get('rules', []) if r.get('inbound') != f"in-{port}"]
+                
+                # 删除节点时同步清理专属 DNS
+                config['dns']['servers'] = [s for s in config.get('dns', {}).get('servers', []) if s.get('tag') != f"dns-{port}"]
+                config['dns']['rules'] = [r for r in config.get('dns', {}).get('rules', []) if r.get('server') != f"dns-{port}"]
+
                 save_config(config)
                 subprocess.run(['systemctl', 'restart', 'sing-box'], check=True)
                 message = f"端口 {port} 的节点已被成功删除！"
@@ -227,9 +325,3 @@ PersistentKeepalive = 25
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-EOF
-
-# 重启面板服务
-systemctl restart wg-manager
-systemctl restart sing-box
-echo "✅ 经典轻量版已在本地强制生效并重启成功！"
