@@ -14,7 +14,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>TikTok WG Manager v3.0</title>
+    <title>TikTok WG Manager v3.1 (防泄漏版)</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; padding: 20px; margin: 0; }
         .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
@@ -35,12 +35,11 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1 style="text-align: center; color: #111827;">🚀 跨境直播全局控制中心 v3.0</h1>
+        <h1 style="text-align: center; color: #111827;">🚀 跨境直播全局控制中心 v3.1 <span style="font-size:16px; color:#10a37f;">(DNS防泄漏)</span></h1>
         
         {% if message %}<div class="success"><b>✅ 成功：</b>{{ message }}</div>{% endif %}
         {% if error %}<div class="error"><b>❌ 错误：</b><pre style="margin:0;">{{ error }}</pre></div>{% endif %}
 
-        <!-- 节点管理面板 -->
         <div class="panel">
             <h2>🖥️ 已配置的 VLESS 节点列表</h2>
             {% if nodes %}
@@ -55,7 +54,7 @@ HTML_TEMPLATE = """
                         <form method="POST" style="display:inline;">
                             <input type="hidden" name="action" value="del_vless">
                             <input type="hidden" name="port" value="{{ node.port }}">
-                            <button type="submit" class="danger" style="padding: 6px 12px; font-size: 13px;" onclick="return confirm('确定要删除端口 {{ node.port }} 的节点吗？')">删除</button>
+                            <button type="submit" class="danger" style="padding: 6px 12px; font-size: 13px;" onclick="return confirm('确定要删除吗？')">删除</button>
                         </form>
                     </td>
                 </tr>
@@ -66,18 +65,17 @@ HTML_TEMPLATE = """
             {% endif %}
         </div>
 
-        <!-- 步骤 1：添加 WG 网卡 -->
         <div class="panel">
             <h2>第一步：添加底层 WireGuard 落地网卡</h2>
             <form method="POST">
                 <input type="hidden" name="action" value="add_wg">
                 <div style="display: flex; gap: 15px;">
                     <div class="form-group" style="flex: 1;">
-                        <label>网卡名称 (如: wg_hk)</label>
+                        <label>网卡名称 (如: wg_jp)</label>
                         <input type="text" name="wg_name" required>
                     </div>
                     <div class="form-group" style="flex: 1;">
-                        <label>本地 IP (Address, 如: 172.16.0.2/30)</label>
+                        <label>本地 IP (Address, 如: 10.66.66.2/32)</label>
                         <input type="text" name="address" required>
                     </div>
                 </div>
@@ -92,16 +90,15 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>服务端 Endpoint (如: hk123.kookeey.info:12345)</label>
+                    <label>服务端 Endpoint (填入NAT分给你的 IP:端口)</label>
                     <input type="text" name="endpoint" required>
                 </div>
                 <button type="submit">➕ 创建并启动 WG 网卡</button>
             </form>
         </div>
 
-        <!-- 步骤 2：生成 VLESS 节点 -->
         <div class="panel">
-            <h2>第二步：生成 VLESS 订阅 (绑定给 WG 网卡)</h2>
+            <h2>第二步：生成 VLESS 订阅 (防DNS泄漏版)</h2>
             <form method="POST">
                 <input type="hidden" name="action" value="add_vless">
                 <div style="display: flex; gap: 15px;">
@@ -110,7 +107,7 @@ HTML_TEMPLATE = """
                         <input type="number" name="port" required>
                     </div>
                     <div class="form-group" style="flex: 1;">
-                        <label>绑定的 WG 网卡名 (如: wg_hk)</label>
+                        <label>绑定的 WG 网卡名 (如: wg_jp)</label>
                         <input type="text" name="wg_interface" required>
                     </div>
                 </div>
@@ -127,7 +124,6 @@ HTML_TEMPLATE = """
                 <button type="submit">⚡ 自动生成节点并应用</button>
             </form>
         </div>
-
     </div>
 </body>
 </html>
@@ -137,9 +133,13 @@ def load_config():
     if os.path.exists(SINGBOX_CONF) and os.path.getsize(SINGBOX_CONF) > 0:
         try:
             with open(SINGBOX_CONF, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
+                # 初始化 DNS 模块，开启独立缓存隔离
+                if 'dns' not in config:
+                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                return config
         except: pass
-    return {"log": {"level": "info"}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
+    return {"log": {"level": "info"}, "dns": {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
 
 def save_config(config):
     os.makedirs(os.path.dirname(SINGBOX_CONF), exist_ok=True)
@@ -152,7 +152,6 @@ def get_nodes(config):
         if inbound.get('type') == 'vless':
             port = inbound.get('listen_port')
             sni = inbound.get('tls', {}).get('server_name', 'N/A')
-            # 查找对应的出站网卡
             wg_bind = "未知"
             for outbound in config.get('outbounds', []):
                 if outbound.get('tag') == f"out-{port}":
@@ -187,6 +186,7 @@ PersistentKeepalive = 25
                 with open(f"/etc/wireguard/{wg_name}.conf", 'w') as f:
                     f.write(wg_conf)
                 
+                subprocess.run(['wg-quick', 'down', wg_name], capture_output=True)
                 subprocess.run(['wg-quick', 'up', wg_name], capture_output=True)
                 subprocess.run(['systemctl', 'enable', f'wg-quick@{wg_name}'])
                 message = f"底层网卡 {wg_name} 已成功创建并启动！"
@@ -201,6 +201,13 @@ PersistentKeepalive = 25
                 pub_key = res.strip().split('\n')[1].split(': ')[1]
                 user_uuid = str(uuid.uuid4())
                 short_id = secrets.token_hex(8)
+
+                # 核心防泄漏逻辑：为该端口生成专属 DNS 路由
+                if 'dns' not in config:
+                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                
+                config['dns']['servers'].append({"tag": f"dns-{port}", "address": "1.1.1.1", "detour": f"out-{port}"})
+                config['dns']['rules'].insert(0, {"inbound": [f"in-{port}"], "server": f"dns-{port}"})
 
                 config['inbounds'].append({"type": "vless", "tag": f"in-{port}", "listen": "::", "listen_port": port, "users": [{"uuid": user_uuid, "flow": "xtls-rprx-vision"}], "tls": {"enabled": True, "server_name": sni, "reality": {"enabled": True, "handshake": {"server": sni, "server_port": 443}, "private_key": priv_key, "short_id": [short_id]}}})
                 config['outbounds'].append({"type": "direct", "tag": f"out-{port}", "bind_interface": wg_int})
@@ -218,6 +225,11 @@ PersistentKeepalive = 25
                 config['inbounds'] = [i for i in config.get('inbounds', []) if i.get('listen_port') != port]
                 config['outbounds'] = [o for o in config.get('outbounds', []) if o.get('tag') != f"out-{port}"]
                 config['route']['rules'] = [r for r in config.get('route', {}).get('rules', []) if r.get('inbound') != f"in-{port}"]
+                
+                # 删除节点时同步清理专属 DNS
+                config['dns']['servers'] = [s for s in config.get('dns', {}).get('servers', []) if s.get('tag') != f"dns-{port}"]
+                config['dns']['rules'] = [r for r in config.get('dns', {}).get('rules', []) if r.get('server') != f"dns-{port}"]
+
                 save_config(config)
                 subprocess.run(['systemctl', 'restart', 'sing-box'], check=True)
                 message = f"端口 {port} 的节点已被成功删除！"
