@@ -1,17 +1,22 @@
 #!/bin/bash
-echo "开始安装 Web 依赖与环境..."
+echo "========================================"
+echo "  TikTok 全局控制中心 - 终极安装脚本"
+echo "========================================"
+
+echo "[1/4] 更新系统并安装全部底层依赖 (WG, Python, Flask)..."
 apt update
-apt install -y python3 python3-pip curl
+apt install -y wireguard openresolv python3-flask curl
 
-echo "安装 Flask 框架..."
-pip3 install Flask --break-system-packages
+echo "[2/4] 安装并配置 sing-box 核心环境..."
+bash <(curl -fsSL https://sing-box.app/install.sh)
 
-echo "创建管理目录并拉取核心代码..."
+echo "[3/4] 拉取控制中心 Web 面板代码..."
 mkdir -p /opt/tiktok-wg-manager
 cd /opt/tiktok-wg-manager
+# 注意：确认此处的 github 用户名是你的
 curl -o server.py -fsSL https://raw.githubusercontent.com/zzzevanhhh/tiktok-wg-manager/main/server.py
 
-echo "配置 systemd 守护进程..."
+echo "[4/4] 配置系统守护进程..."
 cat > /etc/systemd/system/wg-manager.service <<EOF
 [Unit]
 Description=TikTok WG Manager Web UI
@@ -27,8 +32,11 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-echo "启动面板服务..."
 systemctl daemon-reload
 systemctl enable --now wg-manager
+systemctl restart wg-manager
 
-echo "✅ Web 面板部署完成！"
+echo "========================================"
+echo "✅ 所有组件及面板均已部署完成！"
+echo "🌐 请在浏览器打开: http://$(curl -s ifconfig.me):5000"
+echo "========================================"
