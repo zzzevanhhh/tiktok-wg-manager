@@ -129,6 +129,42 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def migrate_legacy_dns_server(s):
+    """将 sing-box 1.12 之前的旧版 DNS server 字段（address）迁移为新格式（type + server）。
+    兼容 1.12.0+，避免出现 'legacy DNS servers is deprecated' 导致的 FATAL 退出。"""
+    if 'type' in s:
+        return s  # 已经是新格式，跳过
+    addr = s.pop('address', None)
+    if addr is None:
+        return s
+    if addr == 'local':
+        s['type'] = 'local'
+    elif '://' in addr:
+        # 例如 https://1.1.1.1/dns-query、tls://8.8.8.8 等
+        scheme, rest = addr.split('://', 1)
+        s['type'] = scheme
+        s['server'] = rest.split('/')[0]
+    else:
+        # 纯 IP，按明文 UDP DNS 处理
+        s['type'] = 'udp'
+        s['server'] = addr
+    return s
+
+
+def migrate_legacy_dns_block(dns_block):
+    """就地迁移整个 dns.servers 列表，返回是否发生了改动。"""
+    changed = False
+    for s in dns_block.get('servers', []):
+        if 'type' not in s:
+            migrate_legacy_dns_server(s)
+            changed = True
+    return changed
+
+
+def default_dns_block():
+    return {"servers": [{"tag": "dns-local", "type": "udp", "server": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+
+
 def load_config():
     if os.path.exists(SINGBOX_CONF) and os.path.getsize(SINGBOX_CONF) > 0:
         try:
@@ -136,10 +172,15 @@ def load_config():
                 config = json.load(f)
                 # 初始化 DNS 模块，开启独立缓存隔离
                 if 'dns' not in config:
-                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                    config['dns'] = default_dns_block()
+                else:
+                    # 自动迁移旧版 DNS server 格式（address -> type/server），
+                    # 修复历史生成的 config.json 触发的 FATAL 崩溃循环
+                    if migrate_legacy_dns_block(config['dns']):
+                        save_config(config)
                 return config
         except: pass
-    return {"log": {"level": "info"}, "dns": {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
+    return {"log": {"level": "info"}, "dns": default_dns_block(), "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
 
 def save_config(config):
     os.makedirs(os.path.dirname(SINGBOX_CONF), exist_ok=True)
@@ -204,9 +245,9 @@ PersistentKeepalive = 25
 
                 # 核心防泄漏逻辑：为该端口生成专属 DNS 路由
                 if 'dns' not in config:
-                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                    config['dns'] = default_dns_block()
                 
-                config['dns']['servers'].append({"tag": f"dns-{port}", "address": "1.1.1.1", "detour": f"out-{port}"})
+                config['dns']['servers'].append({"tag": f"dns-{port}", "type": "udp", "server": "1.1.1.1", "detour": f"out-{port}"})
                 config['dns']['rules'].insert(0, {"inbound": [f"in-{port}"], "server": f"dns-{port}"})
 
                 config['inbounds'].append({"type": "vless", "tag": f"in-{port}", "listen": "::", "listen_port": port, "users": [{"uuid": user_uuid, "flow": "xtls-rprx-vision"}], "tls": {"enabled": True, "server_name": sni, "reality": {"enabled": True, "handshake": {"server": sni, "server_port": 443}, "private_key": priv_key, "short_id": [short_id]}}})
