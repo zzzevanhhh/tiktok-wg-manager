@@ -136,10 +136,10 @@ def load_config():
                 config = json.load(f)
                 # 初始化 DNS 模块，开启独立缓存隔离
                 if 'dns' not in config:
-                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                    config['dns'] = {"servers": [{"tag": "dns-local", "type": "udp", "server": "8.8.8.8"}], "rules": [], "independent_cache": True}
                 return config
         except: pass
-    return {"log": {"level": "info"}, "dns": {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
+    return {"log": {"level": "info"}, "dns": {"servers": [{"tag": "dns-local", "type": "udp", "server": "8.8.8.8"}], "rules": [], "independent_cache": True}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}], "route": {"rules": [], "auto_detect_interface": True}}
 
 def save_config(config):
     os.makedirs(os.path.dirname(SINGBOX_CONF), exist_ok=True)
@@ -204,9 +204,9 @@ PersistentKeepalive = 25
 
                 # 核心防泄漏逻辑：为该端口生成专属 DNS 路由
                 if 'dns' not in config:
-                    config['dns'] = {"servers": [{"tag": "dns-local", "address": "8.8.8.8", "detour": "direct"}], "rules": [], "independent_cache": True}
+                    config['dns'] = {"servers": [{"tag": "dns-local", "type": "udp", "server": "8.8.8.8"}], "rules": [], "independent_cache": True}
                 
-                config['dns']['servers'].append({"tag": f"dns-{port}", "address": "1.1.1.1", "detour": f"out-{port}"})
+                config['dns']['servers'].append({"tag": f"dns-{port}", "type": "udp", "server": "1.1.1.1", "detour": f"out-{port}"})
                 config['dns']['rules'].insert(0, {"inbound": [f"in-{port}"], "server": f"dns-{port}"})
 
                 config['inbounds'].append({"type": "vless", "tag": f"in-{port}", "listen": "::", "listen_port": port, "users": [{"uuid": user_uuid, "flow": "xtls-rprx-vision"}], "tls": {"enabled": True, "server_name": sni, "reality": {"enabled": True, "handshake": {"server": sni, "server_port": 443}, "private_key": priv_key, "short_id": [short_id]}}})
